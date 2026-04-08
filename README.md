@@ -116,7 +116,7 @@ Red tokens push the prediction toward the predicted class; blue tokens push agai
 
 ## Dataset
 
-[EFCAMDAT (EF Cambridge Open Language Database)](https://ef.com/assethub/cambridge) — ~317,000 learner essays across CEFR levels A1–C1, with L1 and nationality metadata. Not included in this repo; access via the EF/Cambridge research portal.
+[EFCAMDAT (EF Cambridge Open Language Database)](https://ef-lab.mmll.cam.ac.uk/EFCAMDAT.html) — ~317,000 learner essays across CEFR levels A1–C1, with L1 and nationality metadata. Not included in this repo; access via the EF/Cambridge research portal.
 
 ---
 
