@@ -1,0 +1,10 @@
+# PyTorch: for CUDA builds see https://pytorch.org/get-started/locally/
+torch>=2.0
+transformers>=4.30.0
+datasets>=2.14.0
+pandas>=2.0
+scikit-learn>=1.3
+shap>=0.42
+tqdm>=4.65
+matplotlib>=3.7
+numpy>=1.24

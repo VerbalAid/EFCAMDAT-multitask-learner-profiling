@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+
+# Large / local artefacts (exceed GitHub size limits or regenerate locally)
+checkpoints/
+Cambridge/
+*.csv
