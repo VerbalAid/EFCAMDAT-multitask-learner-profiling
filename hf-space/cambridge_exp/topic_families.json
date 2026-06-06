@@ -1,0 +1,33 @@
+{
+  "_comment": "EF-CamDAT assigns one prompt topic per CEFR band. Families group semantically related prompts across levels for topic-controlled SHAP.",
+  "workplace_across_levels": {
+    "description": "Office / work context — one official topic string per band (exact match to CSV topic column).",
+    "topics_by_band": {
+      "A1": "Taking inventory in the office",
+      "A2": "Creating an office dress code",
+      "B1": "Issuing a written warning",
+      "B2": "Helping a coworker deal with a phobia",
+      "C1": "Hosting a group of foreign buyers"
+    }
+  },
+  "written_correspondence": {
+    "description": "Letters / invitations / email-style tasks.",
+    "topics_by_band": {
+      "A1": "Replying to a new penpal",
+      "A2": "Writing an email of advice",
+      "B1": "Responding to written invitations",
+      "B2": "Turning down an invitation",
+      "C1": "Writing a rejection letter"
+    }
+  },
+  "writing_about_self": {
+    "description": "Personal / reflective writing.",
+    "topics_by_band": {
+      "A1": "Describing your family in an email",
+      "A2": "Writing a description of your family",
+      "B1": "Writing about a memorable experience",
+      "B2": "Writing a movie review",
+      "C1": "Writing an article about NLP techniques"
+    }
+  }
+}

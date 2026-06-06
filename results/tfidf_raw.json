@@ -1,0 +1,51 @@
+{
+  "text_source": "raw",
+  "n_train": 253776,
+  "n_test": 63444,
+  "heads": {
+    "cefr": {
+      "accuracy": 0.9526669188575752,
+      "macro_f1": 0.865759095700847,
+      "classes": [
+        "A1",
+        "A2",
+        "B1",
+        "B2",
+        "C1"
+      ]
+    },
+    "l1": {
+      "accuracy": 0.6500693524998424,
+      "macro_f1": 0.5471216569232525,
+      "classes": [
+        "Arabic",
+        "French",
+        "German",
+        "Italian",
+        "Japanese",
+        "Mandarin",
+        "Portuguese",
+        "Russian",
+        "Spanish",
+        "Turkish"
+      ]
+    },
+    "nat": {
+      "accuracy": 0.6675020490511318,
+      "macro_f1": 0.5569441485398685,
+      "classes": [
+        "br",
+        "cn",
+        "de",
+        "fr",
+        "it",
+        "jp",
+        "mx",
+        "ru",
+        "sa",
+        "tr",
+        "tw"
+      ]
+    }
+  }
+}

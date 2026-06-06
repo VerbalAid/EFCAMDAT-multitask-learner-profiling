@@ -3,8 +3,20 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 .DS_Store
+.env
 
 # Large / local artefacts (exceed GitHub size limits or regenerate locally)
 checkpoints/
 Cambridge/
 *.csv
+
+# Training logs (large, noisy)
+**/train*.log
+**/nohup.out
+
+# Frontend
+web/node_modules/
+web/dist/
+
+# HF Space local checkpoint copy (push via LFS to the Space repo only)
+hf-space/model/*.pt
