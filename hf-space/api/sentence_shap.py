@@ -226,8 +226,8 @@ def aggregate_to_sentences(
 ) -> List[Dict[str, Any]]:
     """
     Map token attributions to sentences for the predicted class.
-    Sentence score = sum of positive (toward-class) token mass in that sentence.
-    Only sentences with meaningful toward signal are returned.
+    Sentence score = net signed mass (toward − against) in that sentence.
+    Only sentences with positive net toward signal are returned by default.
     """
     sentences = split_sentences(learner_text)
     if not sentences:
@@ -254,22 +254,25 @@ def aggregate_to_sentences(
             against_mass[si] += -shap
 
     total_toward = sum(toward_mass) or 1.0
+    total_signed = sum(max(0.0, toward_mass[i] - against_mass[i]) for i in range(len(sentences))) or 1.0
     out: List[Dict[str, Any]] = []
     for i, sent in enumerate(sentences):
         toward = toward_mass[i]
         against = against_mass[i]
+        signed = toward - against
         if toward <= 0 and against <= 0:
             continue
         sent_start = spans[i][0]
         tokens = _toward_tokens_for_sentence(sent, sent_start, groups, i, sentences)
         attr = toward / total_toward if toward > 0 else 0.0
+        signed_attr = signed / total_signed if total_signed > 0 else 0.0
         out.append(
             {
                 "sentence": sent,
                 "attribution": round(attr, 4),
-                "signed_attribution": round((toward - against) / total_toward, 4),
-                "direction": "positive" if toward >= against else "negative",
-                "signed_mass": round(toward - against, 4),
+                "signed_attribution": round(signed_attr, 4),
+                "direction": "positive" if signed > 0 else "negative",
+                "signed_mass": round(signed, 4),
                 "toward_mass": round(toward, 4),
                 "tokens": tokens,
             }
@@ -278,20 +281,20 @@ def aggregate_to_sentences(
     if not out:
         return []
 
-    peak_toward = max(r["toward_mass"] for r in out)
-    cutoff = peak_toward * _MIN_SENTENCE_FRAC
-    filtered = [r for r in out if r["toward_mass"] >= cutoff or r["direction"] == "negative"]
+    peak_signed = max((r["signed_mass"] for r in out), default=0.0)
+    cutoff = peak_signed * _MIN_SENTENCE_FRAC
+    filtered = [r for r in out if r["signed_mass"] >= cutoff]
     if not filtered:
-        filtered = sorted(out, key=lambda x: x["toward_mass"], reverse=True)[:3]
+        filtered = sorted(out, key=lambda x: x["signed_mass"], reverse=True)[:3]
 
     if sort_by_attribution:
-        filtered.sort(key=lambda x: (x["toward_mass"], x["attribution"]), reverse=True)
+        filtered.sort(key=lambda x: (x["signed_mass"], x["signed_attribution"]), reverse=True)
 
-    supporting = [r for r in filtered if r["toward_mass"] > 0]
+    supporting = [r for r in filtered if r["signed_mass"] > 0]
     if supporting:
-        peak = supporting[0]["toward_mass"]
+        peak = supporting[0]["signed_mass"]
         cutoff = peak * _MIN_SENTENCE_FRAC
-        supporting = [r for r in supporting if r["toward_mass"] >= cutoff]
+        supporting = [r for r in supporting if r["signed_mass"] >= cutoff]
         return supporting[:_MAX_SENTENCES]
 
     return filtered[: min(3, _MAX_SENTENCES)]
@@ -322,33 +325,61 @@ def _phrase_label(row: Dict[str, Any]) -> str:
 
 
 def _quote_phrases(sentences: List[Dict[str, Any]], k: int = 2) -> List[str]:
-    ranked = sorted(sentences, key=lambda x: x.get("toward_mass", 0), reverse=True)
+    ranked = sorted(sentences, key=lambda x: x.get("signed_mass", 0), reverse=True)
     phrases: List[str] = []
     for row in ranked[:k]:
-        if row.get("toward_mass", 0) <= 0:
+        if row.get("signed_mass", 0) <= 0:
             break
         phrases.append(_phrase_label(row))
     return phrases
 
 
+def _describe_sentence_roles(sentences: List[Dict[str, Any]]) -> str:
+    """Heuristic label for where flat attribution concentrates."""
+    if not sentences:
+        return "several passages"
+    ranked = sorted(sentences, key=lambda x: x.get("signed_mass", 0), reverse=True)
+    roles: List[str] = []
+    all_sents = [r["sentence"] for r in ranked]
+    for row in ranked[:3]:
+        sent = row["sentence"]
+        lower = sent.lower()
+        if sent == all_sents[-1] or any(
+            m in lower for m in ("in conclusion", "to sum up", "in summary", "finally")
+        ):
+            roles.append("the conclusion")
+        elif sent == all_sents[0]:
+            roles.append("topic introduction")
+        elif any(m in lower for m in ("because", "therefore", "although", "however")):
+            roles.append("causal reasoning passages")
+        else:
+            roles.append("topic-development sentences")
+    # dedupe preserving order
+    seen: set[str] = set()
+    unique_roles: List[str] = []
+    for r in roles:
+        if r not in seen:
+            seen.add(r)
+            unique_roles.append(r)
+    if len(unique_roles) == 1:
+        return unique_roles[0]
+    return " and ".join(unique_roles[:2])
+
+
 def is_flat_attribution(sentences: List[Dict[str, Any]], threshold: int = 10) -> bool:
-    """True when top 3 supporting sentences are within `threshold` relative % points."""
+    """True when top 3 net-supporting sentences are within `threshold` relative % points."""
     ranked = sorted(
-        [
-            s
-            for s in sentences
-            if s.get("direction") != "negative" and float(s.get("toward_mass") or 0) > 0
-        ],
-        key=lambda x: float(x.get("toward_mass") or 0),
+        [s for s in sentences if float(s.get("signed_mass") or 0) > 0],
+        key=lambda x: float(x.get("signed_mass") or 0),
         reverse=True,
     )
     if len(ranked) < 3:
         return False
-    peak = float(ranked[0].get("toward_mass") or 0)
+    peak = float(ranked[0].get("signed_mass") or 0)
     if peak <= 0:
         return False
     pcts = [
-        max(0, min(100, round(100 * float(r.get("toward_mass") or 0) / peak)))
+        max(0, min(100, round(100 * float(r.get("signed_mass") or 0) / peak)))
         for r in ranked[:3]
     ]
     return max(pcts) - min(pcts) <= threshold
@@ -363,22 +394,33 @@ def template_narrative(
     if not sentences:
         return f"{label} → {predicted_label}: no supporting sentences found."
 
-    ranked = sorted(sentences, key=lambda x: x.get("toward_mass", 0), reverse=True)
+    ranked = sorted(sentences, key=lambda x: x.get("signed_mass", 0), reverse=True)
     top = ranked[0]
     phrases = _quote_phrases(sentences, k=2)
 
-    if top.get("toward_mass", 0) <= 0:
+    if top.get("signed_mass", 0) <= 0:
         return f"{label} → {predicted_label}: no clear token evidence for this class."
 
     if is_flat_attribution(sentences):
-        return (
-            f"{label} → {predicted_label}: attribution spread evenly across "
-            f"sentences; no single sentence dominates the prediction."
+        phrases = _quote_phrases(sentences, k=3)
+        roles = _describe_sentence_roles(ranked)
+        quoted = "; ".join(phrases[:2]) if phrases else ""
+        lead = (
+            f"{label} → {predicted_label}: strongest evidence comes from "
+            f"{roles}. The model appears to rely on overall essay organisation "
+            f"rather than a single sentence."
         )
+        if quoted:
+            lead += f" Top passages: {quoted}."
+        if len(phrases) > 2:
+            lead += f" Also: {phrases[2]}."
+        return lead
 
+    peak_signed = max(float(s.get("signed_mass") or 0) for s in ranked) or 1.0
+    share = float(top.get("signed_mass") or 0) / peak_signed
     lead = (
         f"{label} → {predicted_label}: model leans on {phrases[0]} "
-        f"({top['attribution']:.0%} of toward-class token mass)."
+        f"({share:.0%} net toward-class attribution)."
     )
     if len(phrases) > 1:
         lead += f" Also: {phrases[1]}."
@@ -388,7 +430,7 @@ def template_narrative(
 def _top_row(sentences: List[Dict[str, Any]]) -> tuple[int, Dict[str, Any] | None]:
     if not sentences:
         return 0, None
-    top = max(sentences, key=lambda x: x.get("toward_mass", 0))
+    top = max(sentences, key=lambda x: x.get("signed_mass", 0))
     idx = next((i for i, s in enumerate(sentences) if s["sentence"] == top["sentence"]), 0)
     return idx + 1, top
 
@@ -426,3 +468,74 @@ def narrate_shap_per_head(
         hk: template_narrative(hk, label_for[hk], per_head_sentences.get(hk) or [])
         for hk in head_keys
     }
+
+
+_UNIQUE_MIN = 0.02
+_SHARED_MIN = 0.02
+
+
+def _row_from_mass(sentence: str, mass: float, source_row: Dict[str, Any] | None) -> Dict[str, Any]:
+    base = dict(source_row) if source_row else {"sentence": sentence, "tokens": []}
+    base["sentence"] = sentence
+    base["signed_mass"] = round(mass, 4)
+    base["signed_attribution"] = round(max(mass, 0.0), 4)
+    base["direction"] = "positive" if mass > 0 else "negative"
+    base["attribution"] = round(max(mass, 0.0), 4)
+    return base
+
+
+def decompose_head_attribution(
+    per_head_sentences: Dict[str, List[Dict[str, Any]]],
+    head_keys: List[str],
+) -> Dict[str, Any]:
+    """
+    Split attribution into shared (mean across heads) vs head-specific (residual).
+    unique_attr[head] = attr[head] - mean(attr_all_heads)
+    """
+    if len(head_keys) < 2:
+        return {"shared_signals": [], "head_specific_signals": {}}
+
+    lookup: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    all_sentences: set[str] = set()
+    for hk in head_keys:
+        lookup[hk] = {}
+        for row in per_head_sentences.get(hk) or []:
+            sent = row["sentence"]
+            lookup[hk][sent] = row
+            all_sentences.add(sent)
+
+    shared_scores: Dict[str, float] = {}
+    unique_scores: Dict[str, Dict[str, float]] = {hk: {} for hk in head_keys}
+
+    for sent in all_sentences:
+        masses = {
+            hk: float(lookup.get(hk, {}).get(sent, {}).get("signed_mass") or 0.0)
+            for hk in head_keys
+        }
+        mean_mass = sum(masses.values()) / len(head_keys)
+        shared_scores[sent] = mean_mass
+        for hk in head_keys:
+            unique_scores[hk][sent] = masses[hk] - mean_mass
+
+    def _top_by(scores: Dict[str, float], min_val: float, k: int = 3) -> List[Dict[str, Any]]:
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        out: List[Dict[str, Any]] = []
+        for sent, mass in ranked:
+            if mass < min_val:
+                break
+            source = None
+            for hk in head_keys:
+                if sent in lookup.get(hk, {}):
+                    source = lookup[hk][sent]
+                    break
+            out.append(_row_from_mass(sent, mass, source))
+            if len(out) >= k:
+                break
+        return out
+
+    shared = _top_by(shared_scores, _SHARED_MIN)
+    head_specific = {
+        hk: _top_by(unique_scores[hk], _UNIQUE_MIN)
+        for hk in head_keys
+    }
+    return {"shared_signals": shared, "head_specific_signals": head_specific}

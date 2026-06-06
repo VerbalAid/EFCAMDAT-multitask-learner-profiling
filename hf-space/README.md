@@ -1,52 +1,31 @@
-# L2 Profiler — Hugging Face Space (Docker)
+---
+title: EF-CamDAT L2 Profiler
+emoji: 🎓
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
 
-FastAPI backend for EF-CamDAT L2 Profiler. Pairs with the Vite frontend on Vercel.
+# EF-CamDAT L2 Profiler API
 
-## Prepare
+FastAPI backend: multitask CEFR / L1 / nationality predictions with gradient attribution and OpenRouter summaries.
 
-From the repo root:
+**Endpoints:** `GET /health` · `POST /predict` · `POST /predict/shap_explain`
 
-```bash
-chmod +x hf-space/prepare.sh
-./hf-space/prepare.sh
-```
+Space URL: https://darragh11dec-l2-profiler.hf.space
 
-This copies `api/`, `cambridge_exp/`, and (if present) `checkpoints/baseline_dual/best_model.pt`.
+## Weights (separate Model repo)
 
-## Create the Space
+Checkpoint: **`darragh11dec/weights`** — downloaded at Docker build time (must be **Public**).  
+Deploy with `bash scripts/upload_hf_space.sh` from the Cambridge repo root.
 
-1. [huggingface.co/new-space](https://huggingface.co/new-space) — SDK **Docker**, hardware **CPU basic**, name e.g. `l2-profiler`.
-2. Clone the Space repo and copy everything from `hf-space/` into it.
-3. Track the checkpoint with Git LFS:
+## Secrets (Settings → Variables)
 
-```bash
-git lfs install
-git lfs track "*.pt"
-git add .gitattributes model/best_model.pt
-git commit -m "add model checkpoint"
-git push
-```
-
-## Secrets (Space settings → Variables)
-
-| Variable | Value |
-|----------|--------|
-| `OPENROUTER_API_KEY` | From [openrouter.ai/keys](https://openrouter.ai/keys) |
-| `CORS_ORIGINS` | `https://YOUR-APP.vercel.app,http://localhost:5173` |
+| Variable | Required |
+|----------|----------|
+| `OPENROUTER_API_KEY` | Yes — summaries |
+| `CORS_ORIGINS` | Yes — e.g. `https://your-app.vercel.app,http://localhost:5173` |
 
 Optional: `OPENROUTER_MODEL` (default `meta-llama/llama-3.1-8b-instruct`).
-
-## Test
-
-```bash
-curl https://YOUR_USER-l2-profiler.hf.space/health
-curl -X POST https://YOUR_USER-l2-profiler.hf.space/predict \
-  -H "Content-Type: application/json" \
-  -d '{"text": "In my office there are some desks.", "dual_mode": "raw_only"}'
-```
-
-## Notes
-
-- Uses **gradient attribution** (`CAMBRIDGE_ATTR=gradient`) — no SHAP dependency in the container.
-- Free tier sleeps after ~48h idle; first request may take 30–60s.
-- Set `VITE_API_URL` on Vercel to this Space URL (no trailing slash).

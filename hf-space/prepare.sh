@@ -23,4 +23,4 @@ else
   echo "No local checkpoint at $CKPT — copy best_model.pt to hf-space/model/ manually."
 fi
 
-echo "Done. Next: cd hf-space && git push (HF Space repo with LFS for *.pt)."
+echo "Done. Deploy with: bash scripts/upload_hf_space.sh"

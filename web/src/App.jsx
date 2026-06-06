@@ -18,6 +18,58 @@ function headPrediction(head, result) {
   return result.nationality;
 }
 
+function headConfidenceKey(head) {
+  return head;
+}
+
+function ConfidenceBlock({ data, headKey, label }) {
+  const conf = data?.confidence?.[headKey];
+  const warn = data?.confidence_warnings?.[headKey];
+  if (conf == null) return null;
+  const weak = conf < 0.5 || warn;
+  return (
+    <div className={`pred-grid__conf${weak ? " pred-grid__conf--weak" : ""}`}>
+      <span className="pred-grid__confidence">Confidence: {(conf * 100).toFixed(0)}%</span>
+      {warn && <span className="pred-grid__warn">⚠ {warn}</span>}
+    </div>
+  );
+}
+
+function EvidenceList({ items }) {
+  if (!items?.length) return null;
+  return (
+    <div className="evidence-block">
+      <span className="evidence-block__title">Evidence</span>
+      <ul className="evidence-list">
+        {items.map((item, i) => (
+          <li key={i} className="evidence-list__item">
+            <span className="evidence-list__check">✓</span>
+            <span>
+              {item.feature}
+              {item.examples?.length > 0 && (
+                <span className="evidence-list__examples">
+                  {" "}
+                  ({item.examples.map((e) => `"${e}"`).join(", ")})
+                </span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SignalBlock({ title, head, sentences }) {
+  if (!sentences?.length) return null;
+  return (
+    <div className="signal-block">
+      <h4 className="signal-block__title">{title}</h4>
+      <SentenceHeatmap head={head} sentences={sentences} compact />
+    </div>
+  );
+}
+
 export default function App() {
   const [text, setText] = useState("");
   const [corrected, setCorrected] = useState("");
@@ -121,6 +173,7 @@ export default function App() {
       );
       const j = await parseApiResponse(r);
       setShapResult(j);
+      setResult((prev) => prev || j);
     } catch (x) {
       setShapErr(String(x.message || x));
     } finally {
@@ -270,14 +323,17 @@ export default function App() {
             <div className="pred-grid__item">
               <span className="pred-grid__label">CEFR level</span>
               <span className="pill">{result.cefr}</span>
+              <ConfidenceBlock data={result} headKey="cefr" />
             </div>
             <div className="pred-grid__item">
               <span className="pred-grid__label">L1</span>
               <span className="pred-grid__value">{result.l1}</span>
+              <ConfidenceBlock data={result} headKey="l1" />
             </div>
             <div className="pred-grid__item">
               <span className="pred-grid__label">Nationality</span>
               <span className="pred-grid__value">{result.nationality}</span>
+              <ConfidenceBlock data={result} headKey="nat" />
             </div>
           </div>
           <p className="card__probs">
@@ -286,6 +342,27 @@ export default function App() {
               ?.map((x) => `${x.label} (${(x.prob * 100).toFixed(1)}%)`)
               .join(" · ")}
           </p>
+          {(result.probs_top_l1?.length > 0 || result.probs_top_nat?.length > 0) && (
+            <p className="card__probs">
+              {result.probs_top_l1?.length > 0 && (
+                <>
+                  <strong>Top L1 probs</strong>:{" "}
+                  {result.probs_top_l1
+                    .map((x) => `${x.label} (${(x.prob * 100).toFixed(1)}%)`)
+                    .join(" · ")}
+                </>
+              )}
+              {result.probs_top_nat?.length > 0 && (
+                <>
+                  {result.probs_top_l1?.length > 0 && " · "}
+                  <strong>Top nationality probs</strong>:{" "}
+                  {result.probs_top_nat
+                    .map((x) => `${x.label} (${(x.prob * 100).toFixed(1)}%)`)
+                    .join(" · ")}
+                </>
+              )}
+            </p>
+          )}
           {result.explanation && (
             <div className="card__body">
               <span className="card__body-title">Explanation</span>
@@ -309,14 +386,30 @@ export default function App() {
           {shapResult.head_comparison && (
             <p className="shap-head__comparison">{shapResult.head_comparison}</p>
           )}
+          {shapResult.shared_signals?.length > 0 && (
+            <SignalBlock
+              title="Shared signals (all heads agree)"
+              head="cefr"
+              sentences={shapResult.shared_signals}
+            />
+          )}
           {Object.entries(shapResult.sentence_shap || {}).map(([head, sentences]) => (
             <div key={head} className="shap-head">
               <h3 className="shap-head__title">
                 {HEAD_LABELS[head] || head}
                 <span className="shap-head__pred"> → {headPrediction(head, shapResult)}</span>
               </h3>
+              <ConfidenceBlock data={shapResult} headKey={headConfidenceKey(head)} />
               {shapResult.narrative?.[head] && (
                 <p className="shap-head__narrative">{shapResult.narrative[head]}</p>
+              )}
+              <EvidenceList items={shapResult.evidence?.[head]} />
+              {shapResult.head_specific_signals?.[head]?.length > 0 && (
+                <SignalBlock
+                  title={`${HEAD_LABELS[head] || head}-specific signals`}
+                  head={head}
+                  sentences={shapResult.head_specific_signals[head]}
+                />
               )}
               {shapResult.ollama_narrative?.[head]?.trim() && (
                 <p className="shap-head__summary">{shapResult.ollama_narrative[head]}</p>

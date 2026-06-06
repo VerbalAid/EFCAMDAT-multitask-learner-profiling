@@ -8,23 +8,28 @@ const HEAD_PALETTE = {
   nat: { toward: [120, 70, 180], against: [100, 110, 130] },
 };
 
-function sentenceBackground(head, row, maxToward) {
-  const palette = HEAD_PALETTE[head] || HEAD_PALETTE.cefr;
-  const toward = row.direction !== "negative";
-  const rgb = toward ? palette.toward : palette.against;
-  const mass = row.toward_mass ?? row.attribution ?? 0;
-  const intensity = maxToward > 0 ? Math.min(mass / maxToward, 1) : 0;
-  const scaled = 0.04 + intensity * 0.22;
+/** Net toward-class attribution from API — do not re-derive from toward_mass. */
+function signedScore(row) {
+  if (row.signed_attribution != null) return row.signed_attribution;
+  if (row.signed_mass != null) return row.signed_mass;
+  return 0;
+}
 
-  if (toward) {
-    return {
-      backgroundColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${scaled})`,
-      borderColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.12 + intensity * 0.22})`,
-    };
-  }
+function isToward(row) {
+  return signedScore(row) > 0;
+}
+
+function sentenceBackground(head, row, maxSigned) {
+  const palette = HEAD_PALETTE[head] || HEAD_PALETTE.cefr;
+  const toward = isToward(row);
+  const rgb = toward ? palette.toward : palette.against;
+  const mass = Math.abs(signedScore(row));
+  const intensity = maxSigned > 0 ? Math.min(mass / maxSigned, 1) : 0;
+  const scaled = toward ? 0.04 + intensity * 0.22 : 0.03 + intensity * 0.12;
+
   return {
-    backgroundColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.03 + intensity * 0.12})`,
-    borderColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${0.1 + intensity * 0.15})`,
+    backgroundColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${scaled})`,
+    borderColor: `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${toward ? 0.12 + intensity * 0.22 : 0.1 + intensity * 0.15})`,
   };
 }
 
@@ -97,11 +102,12 @@ function HighlightedSentence({ sentence, tokens, head }) {
   );
 }
 
-function SentenceBlock({ row, head, rank, maxToward }) {
-  const lowSignal = (row.toward_mass ?? row.attribution ?? 0) < ERROR_THRESHOLD;
-  const supporting = row.direction !== "negative";
-  const bg = sentenceBackground(head, row, maxToward);
-  const showPct = supporting && maxToward > 0;
+function SentenceBlock({ row, head, rank, maxSigned }) {
+  const score = signedScore(row);
+  const supporting = isToward(row);
+  const lowSignal = Math.abs(score) < ERROR_THRESHOLD;
+  const bg = sentenceBackground(head, row, maxSigned);
+  const showPct = supporting && maxSigned > 0;
   const showRank = supporting && rank <= 3 && !lowSignal;
   const showMeta = showPct || showRank || !supporting;
 
@@ -122,9 +128,9 @@ function SentenceBlock({ row, head, rank, maxToward }) {
             {showPct && (
               <span
                 className="sentence-block__pct"
-                title="Relative SHAP strength vs the strongest sentence in this head"
+                title="Relative net toward-class attribution vs the strongest sentence in this head"
               >
-                {Math.round(((row.toward_mass ?? row.attribution ?? 0) / maxToward) * 100)}%
+                {Math.round((score / maxSigned) * 100)}%
               </span>
             )}
           </div>
@@ -135,11 +141,11 @@ function SentenceBlock({ row, head, rank, maxToward }) {
   );
 }
 
-export default function SentenceHeatmap({ head, sentences }) {
+export default function SentenceHeatmap({ head, sentences, compact = false }) {
   const rows = useMemo(() => sentences || [], [sentences]);
 
-  const maxToward = useMemo(
-    () => (rows.length ? Math.max(...rows.map((s) => s.toward_mass ?? s.attribution ?? 0)) : 0),
+  const maxSigned = useMemo(
+    () => (rows.length ? Math.max(0, ...rows.map((s) => signedScore(s))) : 0),
     [rows]
   );
 
@@ -147,18 +153,18 @@ export default function SentenceHeatmap({ head, sentences }) {
     return null;
   }
 
-  const hasSignal = maxToward > 0;
+  const hasSignal = maxSigned > 0;
   let rank = 0;
 
   return (
-    <div className={`sentence-list sentence-list--${head}`}>
-      {hasSignal && (
+    <div className={`sentence-list sentence-list--${head}${compact ? " sentence-list--compact" : ""}`}>
+      {hasSignal && !compact && (
         <p className="sentence-list__legend">
-          Top supporting sentences · % = relative SHAP strength · highlights = key tokens
+          Top supporting sentences · % = relative net attribution · highlights = key tokens
         </p>
       )}
       {rows.map((row) => {
-        if (row.direction !== "negative" && (row.toward_mass ?? row.attribution ?? 0) >= ERROR_THRESHOLD) {
+        if (isToward(row) && Math.abs(signedScore(row)) >= ERROR_THRESHOLD) {
           rank += 1;
         }
         return (
@@ -167,7 +173,7 @@ export default function SentenceHeatmap({ head, sentences }) {
             row={row}
             head={head}
             rank={rank}
-            maxToward={maxToward}
+            maxSigned={maxSigned}
           />
         );
       })}

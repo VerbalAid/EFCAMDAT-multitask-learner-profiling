@@ -53,22 +53,64 @@ def _head_logit_from_embeds(
     return heads[head_key](pooled)[0, pred_class_i]
 
 
+def _pad_id(tokenizer) -> int:
+    pad_id = tokenizer.pad_token_id
+    if pad_id is None:
+        pad_id = tokenizer.eos_token_id or 1
+    return int(pad_id)
+
+
+def _token_attr_from_grad(
+    grad: torch.Tensor,
+    input_embeds: torch.Tensor,
+    baseline_embeds: torch.Tensor,
+) -> np.ndarray:
+    """
+    Signed attribution for the predicted-class logit.
+    Use grad * (input - baseline), not grad * input: post-LN embeddings are
+    zero-centred so grad*input often flips sign vs the true toward-class direction.
+    """
+    delta = input_embeds.detach()[0] - baseline_embeds.detach()[0]
+    return (grad[0] * delta).sum(dim=-1).detach().cpu().numpy()
+
+
+def _calibrate_attribution_sign(
+    token_attr: np.ndarray,
+    raw_indices: list[int],
+    logit_input: float,
+    logit_baseline: float,
+) -> np.ndarray:
+    """Flip attribution if learner-token mass disagrees with logit(input) - logit(baseline)."""
+    if not raw_indices:
+        return token_attr
+    expected = float(logit_input - logit_baseline)
+    raw_sum = float(token_attr[raw_indices].sum())
+    if expected == 0.0 or raw_sum == 0.0:
+        return token_attr
+    if (expected > 0) != (raw_sum > 0):
+        return -token_attr
+    return token_attr
+
+
 def _gradient_attr(
     model: torch.nn.Module,
+    tokenizer,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     head_key: str,
     pred_class_i: int,
 ) -> np.ndarray:
     emb = model.encoder.embeddings
-    inputs_embeds = emb(input_ids=input_ids)
-    inputs_embeds.retain_grad()
-    logit = _head_logit_from_embeds(model, inputs_embeds, attention_mask, head_key, pred_class_i)
+    pad_id = _pad_id(tokenizer)
+    input_embeds = emb(input_ids=input_ids)
+    baseline_embeds = emb(input_ids=torch.full_like(input_ids, pad_id))
+    input_embeds.retain_grad()
+    logit = _head_logit_from_embeds(model, input_embeds, attention_mask, head_key, pred_class_i)
     logit.backward(retain_graph=False)
-    grad = inputs_embeds.grad
+    grad = input_embeds.grad
     if grad is None:
-        return np.zeros(inputs_embeds.shape[1], dtype=np.float64)
-    return (grad[0] * inputs_embeds.detach()[0]).sum(dim=-1).detach().cpu().numpy()
+        return np.zeros(input_embeds.shape[1], dtype=np.float64)
+    return _token_attr_from_grad(grad, input_embeds, baseline_embeds)
 
 
 def _integrated_grad_attr(
@@ -81,9 +123,7 @@ def _integrated_grad_attr(
     steps: int = _IG_STEPS,
 ) -> np.ndarray:
     emb = model.encoder.embeddings
-    pad_id = tokenizer.pad_token_id
-    if pad_id is None:
-        pad_id = tokenizer.eos_token_id or 1
+    pad_id = _pad_id(tokenizer)
 
     input_embeds = emb(input_ids=input_ids)
     baseline = emb(input_ids=torch.full_like(input_ids, pad_id))
@@ -98,8 +138,7 @@ def _integrated_grad_attr(
         total_grad = total_grad + grad
 
     avg_grad = total_grad / steps
-    integrated = (input_embeds - baseline).detach() * avg_grad
-    return integrated[0].sum(dim=-1).detach().cpu().numpy()
+    return _token_attr_from_grad(avg_grad, input_embeds, baseline)
 
 
 def _extract_scored_tokens(
@@ -174,10 +213,32 @@ def head_token_attribution(
     model.eval()
     method = "gradient"
 
+    raw_i = _raw_token_indices_from_offsets(offset_mapping, dual_text)
+
     try:
         with torch.enable_grad():
+            with torch.no_grad():
+                emb = model.encoder.embeddings
+                input_embeds_ref = emb(input_ids=input_ids)
+                baseline_embeds_ref = emb(input_ids=torch.full_like(input_ids, _pad_id(tokenizer)))
+                logit_input = float(
+                    _head_logit_from_embeds(
+                        model, input_embeds_ref, attention_mask, head_key, pred_class_i
+                    ).item()
+                )
+                logit_baseline = float(
+                    _head_logit_from_embeds(
+                        model, baseline_embeds_ref, attention_mask, head_key, pred_class_i
+                    ).item()
+                )
+
             model.zero_grad(set_to_none=True)
-            token_attr = _gradient_attr(model, input_ids, attention_mask, head_key, pred_class_i)
+            token_attr = _gradient_attr(
+                model, tokenizer, input_ids, attention_mask, head_key, pred_class_i
+            )
+            token_attr = _calibrate_attribution_sign(
+                token_attr, raw_i, logit_input, logit_baseline
+            )
             scored = _extract_scored_tokens(token_attr, tokenizer, input_ids, dual_text, offset_mapping)
             peak = _raw_peak(scored)
 
@@ -191,6 +252,9 @@ def head_token_attribution(
                 token_attr = _integrated_grad_attr(
                     model, tokenizer, input_ids, attention_mask, head_key, pred_class_i
                 )
+                token_attr = _calibrate_attribution_sign(
+                    token_attr, raw_i, logit_input, logit_baseline
+                )
                 scored = _extract_scored_tokens(
                     token_attr, tokenizer, input_ids, dual_text, offset_mapping
                 )
@@ -198,12 +262,14 @@ def head_token_attribution(
                 peak = _raw_peak(scored)
 
             logger.debug(
-                "gradient_attr %s class=%d method=%s peak=%.4f n_tokens=%d",
+                "gradient_attr %s class=%d method=%s peak=%.4f n_tokens=%d logit=%.3f baseline=%.3f",
                 head_key,
                 pred_class_i,
                 method,
                 peak,
                 len(scored),
+                logit_input,
+                logit_baseline,
             )
     finally:
         model.train(was_training)

@@ -31,7 +31,13 @@ from .local_narrate import hf_generate_chat
 from .ocr import transcribe_upload
 from .ollama_narrate import SUMMARY_MODE, narrate_attribution_per_head
 from .llm_client import llm_available
-from .sentence_shap import aggregate_to_sentences, build_head_comparison, narrate_shap_per_head
+from .sentence_shap import (
+    aggregate_to_sentences,
+    build_head_comparison,
+    decompose_head_attribution,
+    narrate_shap_per_head,
+)
+from .evidence import build_all_evidence
 
 app = FastAPI(title="EF-CamDAT L2 Profiler", version="0.1.0")
 app.add_middleware(
@@ -121,7 +127,17 @@ class PredictResponse(BaseModel):
     l1: str
     nationality: str
     probs_top_cefr: List[ProbItem]
+    probs_top_l1: List[ProbItem] = Field(default_factory=list)
+    probs_top_nat: List[ProbItem] = Field(default_factory=list)
+    confidence: Dict[str, float] = Field(default_factory=dict)
+    confidence_warnings: Dict[str, Optional[str]] = Field(default_factory=dict)
     explanation: Optional[str] = None
+
+
+class EvidenceItem(BaseModel):
+    feature: str
+    matched: bool
+    examples: List[str] = Field(default_factory=list)
 
 
 class PredictShapExplainRequest(BaseModel):
@@ -162,7 +178,14 @@ class PredictShapExplainResponse(BaseModel):
     l1: str
     nationality: str
     probs_top_cefr: List[ProbItem]
+    probs_top_l1: List[ProbItem] = Field(default_factory=list)
+    probs_top_nat: List[ProbItem] = Field(default_factory=list)
+    confidence: Dict[str, float] = Field(default_factory=dict)
+    confidence_warnings: Dict[str, Optional[str]] = Field(default_factory=dict)
     sentence_shap: Dict[str, List[SentenceAttribution]]
+    shared_signals: List[SentenceAttribution] = Field(default_factory=list)
+    head_specific_signals: Dict[str, List[SentenceAttribution]] = Field(default_factory=dict)
+    evidence: Dict[str, List[EvidenceItem]] = Field(default_factory=dict)
     narrative: Optional[Dict[str, str]] = Field(
         None,
         description="Per-head template summary from sentence SHAP (keys: cefr, l1, nat)",
@@ -242,6 +265,50 @@ def _load():
     _MODEL.eval()
 
 
+def _topk_probs(logits, enco, k=3) -> List[ProbItem]:
+    p = F.softmax(logits[0], dim=-1)
+    vals, inds = torch.topk(p, k=min(k, p.numel()))
+    return [
+        ProbItem(label=enco.inverse_transform([int(i)])[0], prob=float(v))
+        for v, i in zip(vals, inds)
+    ]
+
+
+def _confidence_bundle(
+    out,
+    cefr_enc,
+    l1_enc,
+    nat_enc,
+) -> tuple[Dict[str, float], Dict[str, Optional[str]], Dict[str, List[ProbItem]]]:
+    probs_cefr = _topk_probs(out["cefr"], cefr_enc)
+    probs_l1 = _topk_probs(out["l1"], l1_enc)
+    probs_nat = _topk_probs(out["nat"], nat_enc)
+    confidence = {
+        "cefr": probs_cefr[0].prob if probs_cefr else 0.0,
+        "l1": probs_l1[0].prob if probs_l1 else 0.0,
+        "nat": probs_nat[0].prob if probs_nat else 0.0,
+    }
+    warnings: Dict[str, Optional[str]] = {
+        "cefr": _confidence_warning(probs_cefr),
+        "l1": _confidence_warning(probs_l1),
+        "nat": _confidence_warning(probs_nat),
+    }
+    probs = {"cefr": probs_cefr, "l1": probs_l1, "nat": probs_nat}
+    return confidence, warnings, probs
+
+
+def _confidence_warning(probs: List[ProbItem]) -> Optional[str]:
+    if not probs:
+        return None
+    top = probs[0].prob
+    second = probs[1].prob if len(probs) > 1 else 0.0
+    if top < 0.5:
+        return "Weak signal. Several classes received similar scores."
+    if top - second < 0.15:
+        return "Close call. Top two classes are nearly tied."
+    return None
+
+
 def _local_explain(payload: str) -> Optional[str]:
     system = (
         "You help thesis readers interpret a multilingual learner profiling model. "
@@ -294,22 +361,19 @@ def predict(body: PredictRequest):
     with torch.no_grad():
         out = _MODEL(**enc)
 
-    def topk(logits, enco, k=3):
-        p = F.softmax(logits[0], dim=-1)
-        vals, inds = torch.topk(p, k=min(k, p.numel()))
-        return [
-            ProbItem(label=enco.inverse_transform([int(i)])[0], prob=float(v))
-            for v, i in zip(vals, inds)
-        ]
-
     ci = int(out["cefr"].argmax(-1).item())
     li = int(out["l1"].argmax(-1).item())
     ni = int(out["nat"].argmax(-1).item())
+    confidence, warnings, probs = _confidence_bundle(out, _CEFR_ENC, _L1_ENC, _NAT_ENC)
     pred = PredictResponse(
         cefr=_CEFR_ENC.inverse_transform([ci])[0],
         l1=_L1_ENC.inverse_transform([li])[0],
         nationality=_NAT_ENC.inverse_transform([ni])[0],
-        probs_top_cefr=topk(out["cefr"], _CEFR_ENC),
+        probs_top_cefr=probs["cefr"],
+        probs_top_l1=probs["l1"],
+        probs_top_nat=probs["nat"],
+        confidence=confidence,
+        confidence_warnings=warnings,
     )
 
     expl_payload = (
@@ -357,17 +421,10 @@ def predict_shap_explain(body: PredictShapExplainRequest):
     with torch.no_grad():
         out = _MODEL(**enc_d)
 
-    def topk(logits, enco, k=3):
-        p = F.softmax(logits[0], dim=-1)
-        vals, inds = torch.topk(p, k=min(k, p.numel()))
-        return [
-            ProbItem(label=enco.inverse_transform([int(i)])[0], prob=float(v))
-            for v, i in zip(vals, inds)
-        ]
-
     ci = int(out["cefr"].argmax(-1).item())
     li = int(out["l1"].argmax(-1).item())
     ni = int(out["nat"].argmax(-1).item())
+    confidence, warnings, probs = _confidence_bundle(out, _CEFR_ENC, _L1_ENC, _NAT_ENC)
     preds = {
         "cefr": _CEFR_ENC.inverse_transform([ci])[0],
         "l1": _L1_ENC.inverse_transform([li])[0],
@@ -394,6 +451,8 @@ def predict_shap_explain(body: PredictShapExplainRequest):
     per_head_rows = {k: [r.model_dump() for r in v] for k, v in sentence_shap.items()}
     narrative = narrate_shap_per_head(preds, per_head_rows, heads) if body.summarize else None
     comparison = build_head_comparison(per_head_rows, heads)
+    decomposed = decompose_head_attribution(per_head_rows, heads)
+    evidence_raw = build_all_evidence(preds, heads, body.text)
 
     ollama_narrative = None
     summary_mode = None
@@ -408,8 +467,21 @@ def predict_shap_explain(body: PredictShapExplainRequest):
         cefr=preds["cefr"],
         l1=preds["l1"],
         nationality=preds["nationality"],
-        probs_top_cefr=topk(out["cefr"], _CEFR_ENC),
+        probs_top_cefr=probs["cefr"],
+        probs_top_l1=probs["l1"],
+        probs_top_nat=probs["nat"],
+        confidence=confidence,
+        confidence_warnings=warnings,
         sentence_shap=sentence_shap,
+        shared_signals=[SentenceAttribution(**r) for r in decomposed["shared_signals"]],
+        head_specific_signals={
+            hk: [SentenceAttribution(**r) for r in rows]
+            for hk, rows in decomposed["head_specific_signals"].items()
+        },
+        evidence={
+            hk: [EvidenceItem(**item) for item in items]
+            for hk, items in evidence_raw.items()
+        },
         narrative=narrative,
         head_comparison=comparison,
         ollama_narrative=ollama_narrative,
